@@ -5,11 +5,12 @@
   "type": "commonjs",
   "private": true,
   "engines": { "node": "20.x" },
- "scripts": {
+"scripts": {
   "start": "node server.js",
   "dev": "nodemon server.js",
-  "postinstall": "PUPPETEER_PRODUCT=chromium node node_modules/puppeteer/install.mjs"
+  "postinstall": "PUPPETEER_PRODUCT=chrome node node_modules/puppeteer/install.mjs"
 },
+
   "keywords": [],
   "author": "",
   "license": "ISC",
