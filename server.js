@@ -5,17 +5,17 @@ const puppeteer = require('puppeteer');
 
 const app = express();
 
-// — Body parser com limite generoso (para HTML grande futuramente)
+// Body parser (HTML grande)
 app.use(express.json({ limit: '15mb' }));
 
-// — CORS (ajuste a origin para seu domínio Netlify quando souber)
+// CORS (ajuste origin depois)
 app.use(cors({
-  origin: '*', // ex.: 'https://SEU-SITE.netlify.app'
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
 }));
 
-// Responder qualquer preflight sem usar app.options('*')
+// Preflight genérico
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,52 +26,64 @@ app.use((req, res, next) => {
   next();
 });
 
-// — Rota de saúde
+// Health
 app.get('/health', (req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-// — Home simples
+// Home
 app.get('/', (req, res) => {
   res.type('text/plain').send('IQPro backend OK');
 });
 
-// — Rota real para gerar PDF com Puppeteer
+// PDF
 app.post('/api/gerar-pdf', async (req, res) => {
   const { html } = req.body;
-  console.log("🚀 /api/gerar-pdf chamado. HTML length:", html?.length || 0);
+  console.log('🚀 /api/gerar-pdf chamado. HTML length:', html?.length || 0);
 
-  if (!html) {
-    return res.status(400).json({ error: "HTML ausente" });
-  }
+  if (!html) return res.status(400).json({ error: 'HTML ausente' });
 
   let browser;
   try {
     browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      channel: 'chrome', // usa o Chrome instalado no postinstall
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--single-process',
+        '--no-zygote',
+      ],
     });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
 
-    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
-    console.log("✅ PDF gerado. Bytes:", pdfBuffer.length);
+    const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(0);
+    page.setDefaultTimeout(0);
+
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 0 });
+
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' },
+    });
+    console.log('✅ PDF gerado. Bytes:', pdfBuffer.length);
 
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'attachment; filename="prova.pdf"',
     });
     res.send(pdfBuffer);
-
   } catch (err) {
-    console.error("❌ Erro ao gerar PDF:", err);
-    res.status(500).json({ error: "Erro ao gerar PDF", details: err.message });
+    console.error('❌ Erro ao gerar PDF:', err);
+    res.status(500).json({ error: 'Erro ao gerar PDF', details: err.message });
   } finally {
     if (browser) await browser.close();
   }
 });
 
-
-// — Porta do Render vem de process.env.PORT
+// Start
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor ouvindo em http://localhost:${PORT}`);
