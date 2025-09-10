@@ -45,17 +45,20 @@ app.post('/api/gerar-pdf', async (req, res) => {
 
   let browser;
   try {
-    browser = await puppeteer.launch({
-      channel: 'chrome', // usa o Chrome instalado no postinstall
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--single-process',
-        '--no-zygote',
-      ],
-    });
+    // Usa o Chrome/Chromium baixado pelo Puppeteer (postinstall)
+    const execPath = await puppeteer.executablePath();
+
+  browser = await puppeteer.launch({
+  headless: 'new',
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--single-process',
+    '--no-zygote'
+  ]
+});
+
 
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(0);
