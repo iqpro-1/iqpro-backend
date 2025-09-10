@@ -45,11 +45,13 @@ app.post('/api/gerar-pdf', async (req, res) => {
 
   let browser;
   try {
+    
     // Usa o Chrome/Chromium baixado pelo Puppeteer (postinstall)
-    const execPath = await puppeteer.executablePath();
+const execPath = await puppeteer.executablePath();
 
-  browser = await puppeteer.launch({
+browser = await puppeteer.launch({
   headless: 'new',
+  executablePath: execPath, // <-- usar o caminho resolvido
   args: [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -58,6 +60,7 @@ app.post('/api/gerar-pdf', async (req, res) => {
     '--no-zygote'
   ]
 });
+
 
 
     const page = await browser.newPage();
