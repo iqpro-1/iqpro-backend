@@ -1,183 +1,116 @@
-// backend/server.js
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const puppeteer = require('puppeteer');
+// server.js
+const express = require("express");
+const cors = require("cors");
+const puppeteer = require("puppeteer");
 
 const app = express();
 
-// Body parser (HTML grande)
-app.use(express.json({ limit: '15mb' }));
-
-// CORS (ajuste origin depois)
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-}));
-
-// Preflight genérico
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    return res.sendStatus(204);
-  }
-  next();
-});
-
-// Health
-app.get('/health', (req, res) => {
-  res.json({ ok: true, ts: new Date().toISOString() });
-});
-
-// Home
-app.get('/', (req, res) => {
-  res.type('text/plain').send('IQPro backend OK');
-});
-
-/**
- * Utilitário: tenta retornar o primeiro caminho existente na lista.
- */
-function firstExisting(paths) {
-  for (const p of paths) {
-    if (p && fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-/**
- * Busca recursiva (rasteira) por um arquivo chamado "chrome" (ou "chrome-headless-shell")
- * dentro de um diretório base. Limita profundidade para evitar custos altos.
- */
-function findChromeBinary(baseDir, maxDepth = 4) {
-  try {
-    if (!baseDir || !fs.existsSync(baseDir)) return null;
-
-    const targetNames = new Set(['chrome', 'chrome-headless-shell']);
-    function walk(dir, depth) {
-      if (depth > maxDepth) return null;
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const full = path.join(dir, e.name);
-        if (e.isFile() && targetNames.has(e.name) && fs.existsSync(full)) {
-          return full;
-        }
-      }
-      for (const e of entries) {
-        if (e.isDirectory()) {
-          const found = walk(path.join(dir, e.name), depth + 1);
-          if (found) return found;
-        }
-      }
-      return null;
-    }
-    return walk(baseDir, 0);
-  } catch {
-    return null;
-  }
-}
-
-// PDF
-app.post('/api/gerar-pdf', async (req, res) => {
-  const { html } = req.body;
-  console.log('🚀 /api/gerar-pdf chamado. HTML length:', html?.length || 0);
-
-  if (!html) return res.status(400).json({ error: 'HTML ausente' });
-
-  let browser;
-  try {
-    const projectRoot = process.cwd();
-
-    // 1) Prioriza caminho explícito via ENV (se você definiu em Render → Environment)
-    const envExec = process.env.PUPPETEER_EXECUTABLE_PATH;
-
-    // 2) Tenta em .puppeteer dentro do projeto (artefato de build)
-    //    - casos comuns: chrome for testing e chrome-headless-shell
-    const localCache = path.join(projectRoot, '.puppeteer');
-    const localChromeGuess = firstExisting([
-      path.join(localCache, 'chrome', 'linux-140.0.7339.80', 'chrome-linux64', 'chrome'),
-      path.join(localCache, 'chrome-headless-shell', 'linux-140.0.7339.80', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
-    ]) || findChromeBinary(localCache);
-
-    // 3) Últimos candidatos: diretórios padrão do Render (se o cache do build sobrevive)
-    const renderCache = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-    const renderGuess = firstExisting([
-      path.join(renderCache, 'chrome', 'linux-140.0.7339.80', 'chrome-linux64', 'chrome'),
-      path.join(renderCache, 'chrome-headless-shell', 'linux-140.0.7339.80', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
-    ]) || findChromeBinary(renderCache);
-
-    // 4) Por fim, deixa o Puppeteer resolver (pode apontar para Chrome for Testing baixado)
-    let execPath = firstExisting([envExec, localChromeGuess, renderGuess]);
-
-    if (!execPath) {
-      try {
-        const p = await puppeteer.executablePath();
-        if (p && fs.existsSync(p)) execPath = p;
-      } catch {
-        // ignora — vamos reportar melhor abaixo
-      }
-    }
-
-    // 5) Se ainda não achou, retorna erro com caminhos tentados para facilitar debug
-    if (!execPath) {
-      const tried = [
-        envExec,
-        localChromeGuess ? '(dinâmico: encontrado via scan em .puppeteer)' : path.join(localCache, '...'),
-        renderGuess ? '(dinâmico: encontrado via scan em cache do Render)' : path.join(renderCache, '...'),
-        '(puppeteer.executablePath() falhou ou não existe no filesystem)',
-      ];
-      return res.status(500).json({
-        error: 'Chrome não encontrado no runtime',
-        details: 'Nenhum executável válido foi localizado.',
-        tried,
-      });
-    }
-
-    console.log('🧭 Usando Chrome em:', execPath);
-
-    browser = await puppeteer.launch({
-      headless: 'new',
-      executablePath: execPath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--single-process',
-        '--no-zygote',
-      ],
-    });
-
-    const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(0);
-    page.setDefaultTimeout(0);
-
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 0 });
-
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' },
-    });
-    console.log('✅ PDF gerado. Bytes:', pdfBuffer.length);
-
-    res.set({
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': 'attachment; filename="prova.pdf"',
-    });
-    res.send(pdfBuffer);
-  } catch (err) {
-    console.error('❌ Erro ao gerar PDF:', err);
-    res.status(500).json({ error: 'Erro ao gerar PDF', details: err.message });
-  } finally {
-    if (browser) await browser.close();
-  }
-});
-
-// Start
+// --- Config ---
 const PORT = process.env.PORT || 3000;
+const ALLOWED_ORIGINS = [
+  // ajuste conforme necessário:
+  /\.netlify\.app$/,
+  /\.netlify\.com$/,
+  /localhost:\d+$/,
+  /127\.0\.0\.1:\d+$/,
+  /render\.com$/,
+];
+
+// --- Middlewares ---
+app.use(express.json({ limit: "15mb" }));
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // em dev (sem origin) ou se bater local/file
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.some((re) => re.test(origin))) return cb(null, true);
+      return cb(new Error("Origin not allowed by CORS"), false);
+    },
+  })
+);
+
+// --- Puppeteer (singleton) ---
+let _browser = null;
+async function getBrowser() {
+  if (_browser && _browser.process() && !_browser.process().killed) return _browser;
+
+  _browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-zygote",
+      "--single-process",
+    ],
+    // em Render, usar o Chrome baixado pelo postinstall do puppeteer (default)
+  });
+
+  // fecha com o processo
+  const cleanup = async () => {
+    try { await _browser?.close(); } catch {}
+    process.exit(0);
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  return _browser;
+}
+
+// --- Healthcheck ---
+app.get("/healthz", (_req, res) => {
+  res.status(200).json({ ok: true, uptime: process.uptime() });
+});
+
+// --- Endpoint principal ---
+app.post("/api/gerar-pdf", async (req, res) => {
+  try {
+    const { html } = req.body || {};
+    if (!html || typeof html !== "string" || html.length < 20) {
+      return res.status(400).json({ error: "HTML inválido ou vazio." });
+    }
+
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+
+    // Evita travar em redes externas; garante fonts/images quando possível
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      // bloqueia recursos pesados que não afetam PDF
+      const blocked = new Set(["media", "font"]);
+      if (blocked.has(request.resourceType())) return request.abort();
+      request.continue();
+    });
+
+    // Injeta HTML diretamente
+    await page.setContent(html, {
+      waitUntil: ["load", "domcontentloaded", "networkidle0"],
+    });
+
+    // Emula impressão respeitando CSS/KaTeX
+    await page.emulateMediaType("print");
+
+    // Gera PDF A4 respeitando @page e tamanhos CSS
+    const pdfBuffer = await page.pdf({
+      printBackground: true,
+      preferCSSPageSize: true, // respeita @page size e margens do seu HTML
+      format: "A4",            // fallback se @page não estiver presente
+    });
+
+    await page.close();
+
+    // Retorna binário com o content-type correto
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'inline; filename="prova.pdf"');
+    return res.status(200).send(pdfBuffer);
+  } catch (err) {
+    console.error("Erro ao gerar PDF:", err);
+    return res.status(500).json({ error: "Falha ao gerar PDF", detail: String(err && err.message || err) });
+  }
+});
+
+// --- Start ---
 app.listen(PORT, () => {
-  console.log(`Servidor ouvindo em http://localhost:${PORT}`);
+  console.log(`PDF service listening on :${PORT}`);
 });
