@@ -1,116 +1,142 @@
 // server.js
-const express = require("express");
-const cors = require("cors");
-const puppeteer = require("puppeteer");
+// --------------------------------------------
+// API simples para gerar PDF a partir de HTML
+// Compatível com Render.com e Node 20.x
+// --------------------------------------------
+
+const express = require('express');
+const cors = require('cors');
+const puppeteer = require('puppeteer'); // use 'puppeteer' (não 'puppeteer-core')
+const fs = require('fs');
 
 const app = express();
+app.use(cors());
+app.use(express.json({ limit: '20mb' })); // recebe HTML grande
 
-// --- Config ---
-const PORT = process.env.PORT || 3000;
-const ALLOWED_ORIGINS = [
-  // ajuste conforme necessário:
-  /\.netlify\.app$/,
-  /\.netlify\.com$/,
-  /localhost:\d+$/,
-  /127\.0\.0\.1:\d+$/,
-  /render\.com$/,
-];
+const PORT = process.env.PORT || 10000;
 
-// --- Middlewares ---
-app.use(express.json({ limit: "15mb" }));
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // em dev (sem origin) ou se bater local/file
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.some((re) => re.test(origin))) return cb(null, true);
-      return cb(new Error("Origin not allowed by CORS"), false);
-    },
-  })
-);
-
-// --- Puppeteer (singleton) ---
 let _browser = null;
+
+// Resolve o caminho do Chrome dinamicamente.
+// Prioridades:
+// 1) PUPPETEER_EXECUTABLE_PATH (se definido)
+// 2) puppeteer.executablePath() (o Chrome/Chromium baixado no postinstall)
+// 3) fallbacks comuns do SO (se existirem)
+async function getExecutablePath() {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+  try {
+    const ep = puppeteer.executablePath();
+    if (ep && fs.existsSync(ep)) return ep;
+  } catch (_) {}
+  const fallbacks = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+  ];
+  for (const p of fallbacks) {
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined; // deixa o Puppeteer escolher
+}
+
 async function getBrowser() {
-  if (_browser && _browser.process() && !_browser.process().killed) return _browser;
+  if (_browser) return _browser;
+
+  const executablePath = await getExecutablePath();
+  if (executablePath) {
+    console.log(`🧭 Usando Chrome em: ${executablePath}`);
+  } else {
+    console.log('🧭 Usando Chrome baixado pelo puppeteer (executablePath indefinido).');
+  }
 
   _browser = await puppeteer.launch({
-    headless: "new",
+    headless: 'new', // ou true
+    executablePath,  // pode ser undefined; puppeteer usa o próprio
     args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+      '--font-render-hinting=none',
     ],
-    // em Render, usar o Chrome baixado pelo postinstall do puppeteer (default)
   });
-
-  // fecha com o processo
-  const cleanup = async () => {
-    try { await _browser?.close(); } catch {}
-    process.exit(0);
-  };
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
 
   return _browser;
 }
 
-// --- Healthcheck ---
-app.get("/healthz", (_req, res) => {
-  res.status(200).json({ ok: true, uptime: process.uptime() });
-});
+// Healthcheck simples (Render usa para verificar se está no ar)
+app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-// --- Endpoint principal ---
-app.post("/api/gerar-pdf", async (req, res) => {
+// Endpoint principal: recebe { html } e devolve PDF
+app.post('/api/gerar-pdf', async (req, res) => {
   try {
     const { html } = req.body || {};
-    if (!html || typeof html !== "string" || html.length < 20) {
-      return res.status(400).json({ error: "HTML inválido ou vazio." });
+
+    if (typeof html !== 'string' || !html.trim()) {
+      return res.status(400).json({ error: 'Body inválido. Esperado { html: "<html...>" }' });
     }
+
+    console.log(`🚀 /api/gerar-pdf chamado. HTML length: ${html.length}`);
 
     const browser = await getBrowser();
     const page = await browser.newPage();
 
-    // Evita travar em redes externas; garante fonts/images quando possível
-    await page.setRequestInterception(true);
-    page.on("request", (request) => {
-      // bloqueia recursos pesados que não afetam PDF
-      const blocked = new Set(["media", "font"]);
-      if (blocked.has(request.resourceType())) return request.abort();
-      request.continue();
+    // Viewport e mídia de impressão
+    await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 }); // ~A4 @96dpi
+    await page.emulateMediaType('print');
+
+    // Garante uma base HTML válida. O front costuma enviar o CSS/KaTeX já no HTML.
+    const fullHtml = /^<!doctype/i.test(html) ? html : `<!doctype html>
+<html lang="pt-br">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body>${html}</body></html>`;
+
+    await page.setContent(fullHtml, {
+      waitUntil: ['load', 'domcontentloaded', 'networkidle0'],
+      timeout: 60_000,
     });
 
-    // Injeta HTML diretamente
-    await page.setContent(html, {
-      waitUntil: ["load", "domcontentloaded", "networkidle0"],
-    });
-
-    // Emula impressão respeitando CSS/KaTeX
-    await page.emulateMediaType("print");
-
-    // Gera PDF A4 respeitando @page e tamanhos CSS
-    const pdfBuffer = await page.pdf({
+    // Gera PDF (A4, usa @page do CSS do front)
+    const pdf = await page.pdf({
       printBackground: true,
-      preferCSSPageSize: true, // respeita @page size e margens do seu HTML
-      format: "A4",            // fallback se @page não estiver presente
+      preferCSSPageSize: true,
+      format: 'A4', // ignorado se preferCSSPageSize:true + @page size
+      margin: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
     await page.close();
 
-    // Retorna binário com o content-type correto
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'inline; filename="prova.pdf"');
-    return res.status(200).send(pdfBuffer);
+    console.log(`✅ PDF gerado. Bytes: ${pdf.length}`);
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'attachment; filename="prova.pdf"',
+      'Cache-Control': 'no-store',
+    });
+    return res.status(200).send(pdf);
   } catch (err) {
-    console.error("Erro ao gerar PDF:", err);
-    return res.status(500).json({ error: "Falha ao gerar PDF", detail: String(err && err.message || err) });
+    console.error('Erro ao gerar PDF:', err);
+    return res.status(500).json({
+      error: 'Falha ao gerar PDF',
+      detail: err && err.message ? err.message : String(err),
+    });
   }
 });
 
-// --- Start ---
+// Sobe o servidor
 app.listen(PORT, () => {
-  console.log(`PDF service listening on :${PORT}`);
+  console.log(`Servidor ouvindo em http://localhost:${PORT}`);
 });
+
+// Encerramento limpo na Render
+async function closeBrowser() {
+  if (_browser) {
+    try { await _browser.close(); } catch (_) {}
+    _browser = null;
+  }
+}
+process.on('SIGTERM', async () => { await closeBrowser(); process.exit(0); });
+process.on('SIGINT', async () => { await closeBrowser(); process.exit(0); });
