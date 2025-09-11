@@ -1,25 +1,20 @@
 // server.js
-// --------------------------------------------
-// API para gerar PDF a partir de HTML (Render/Node 20)
-// --------------------------------------------
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer'); // pacote completo
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
 const PORT = process.env.PORT || 10000;
-const PDF_TIMEOUT_MS = parseInt(process.env.PDF_TIMEOUT_MS || '120000', 10); // 120s padrão
+const PDF_TIMEOUT_MS = parseInt(process.env.PDF_TIMEOUT_MS || '120000', 10);
 let _browser = null;
 
-// pequeno helper para substituir page.waitForTimeout (removido no pptr v24)
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function getBrowser() {
   if (_browser) return _browser;
-
   _browser = await puppeteer.launch({
     headless: 'new',
     args: [
@@ -31,15 +26,12 @@ async function getBrowser() {
       '--font-render-hinting=none',
     ],
   });
-
   console.log('🧭 Chrome iniciado pelo Puppeteer');
   return _browser;
 }
 
-// Healthcheck
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-// Geração de PDF
 app.post('/api/gerar-pdf', async (req, res) => {
   try {
     const { html } = req.body || {};
@@ -51,62 +43,37 @@ app.post('/api/gerar-pdf', async (req, res) => {
 
     const browser = await getBrowser();
     const page = await browser.newPage();
-
-    // timeouts padrão mais altos
     page.setDefaultNavigationTimeout(PDF_TIMEOUT_MS);
     page.setDefaultTimeout(PDF_TIMEOUT_MS);
 
-    // bloquear fontes externas/analytics (reduz requisições que atrasam)
+    // corta fontes/analytics que atrasam
     await page.setRequestInterception(true);
-    page.on('request', (reqq) => {
-      const url = reqq.url();
-      // bloqueia analytics, webfonts e afins
+    page.on('request', (rq) => {
+      const url = rq.url();
       if (
         /\.(woff2?|ttf|otf)$/i.test(url) ||
         /google-analytics|googletagmanager|gtag|hotjar|facebook|doubleclick/i.test(url)
-      ) {
-        return reqq.abort();
-      }
-      return reqq.continue();
+      ) return rq.abort();
+      rq.continue();
     });
 
-    // viewport e mídia de impressão
     await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 });
     await page.emulateMediaType('print');
 
-    const fullHtml = /^<!doctype/i.test(html)
-      ? html
-      : `<!doctype html>
+    const fullHtml = /^<!doctype/i.test(html) ? html : `<!doctype html>
 <html lang="pt-br">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>${html}</body>
-</html>`;
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body>${html}</body></html>`;
 
-    // não use networkidle0; só DOM pronto
-    await page.setContent(fullHtml, {
-      waitUntil: 'domcontentloaded',
-      timeout: PDF_TIMEOUT_MS,
-    });
+    await page.setContent(fullHtml, { waitUntil: 'domcontentloaded', timeout: PDF_TIMEOUT_MS });
 
-    // aguarda imagens decodificarem
     await page.evaluate(async () => {
       const imgs = Array.from(document.images || []);
-      await Promise.all(
-        imgs.map((img) =>
-          img.decode().catch(() => {
-            /* ignora erros de decode */
-          })
-        )
-      );
+      await Promise.all(imgs.map(img => img.decode().catch(() => {})));
     });
-
-    // pequeno respiro para layout (substitui page.waitForTimeout)
     await delay(250);
 
-    const pdf = await page.pdf({
+    const pdfData = await page.pdf({
       printBackground: true,
       preferCSSPageSize: true,
       format: 'A4',
@@ -115,14 +82,19 @@ app.post('/api/gerar-pdf', async (req, res) => {
     });
 
     await page.close();
-    console.log(`✅ PDF gerado. Bytes: ${pdf.length}`);
+
+    // 🔑 GARANTE Buffer (evita serialização JSON de TypedArray)
+    const pdfBuffer = Buffer.isBuffer(pdfData) ? pdfData : Buffer.from(pdfData);
+
+    console.log(`✅ PDF gerado. Bytes: ${pdfBuffer.length}`);
 
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'attachment; filename="prova.pdf"',
+      'Content-Length': String(pdfBuffer.length),
       'Cache-Control': 'no-store',
     });
-    return res.status(200).send(pdf);
+    return res.end(pdfBuffer); // usa end com Buffer
   } catch (err) {
     console.error('Erro ao gerar PDF:', err);
     return res.status(500).json({
@@ -132,17 +104,12 @@ app.post('/api/gerar-pdf', async (req, res) => {
   }
 });
 
-// Sobe o servidor
 app.listen(PORT, () => {
   console.log(`Servidor ouvindo em http://localhost:${PORT}`);
 });
 
-// Encerramento limpo
 async function closeBrowser() {
-  if (_browser) {
-    try { await _browser.close(); } catch (_) {}
-    _browser = null;
-  }
+  if (_browser) { try { await _browser.close(); } catch {} _browser = null; }
 }
 process.on('SIGTERM', async () => { await closeBrowser(); process.exit(0); });
 process.on('SIGINT', async () => { await closeBrowser(); process.exit(0); });
