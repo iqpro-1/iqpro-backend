@@ -6,8 +6,7 @@
 
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer'); // use 'puppeteer' (não 'puppeteer-core')
-const fs = require('fs');
+const puppeteer = require('puppeteer'); // usa puppeteer completo
 
 const app = express();
 app.use(cors());
@@ -17,64 +16,33 @@ const PORT = process.env.PORT || 10000;
 
 let _browser = null;
 
-// Resolve o caminho do Chrome dinamicamente.
-// Prioridades:
-// 1) PUPPETEER_EXECUTABLE_PATH (se definido)
-// 2) puppeteer.executablePath() (o Chrome/Chromium baixado no postinstall)
-// 3) fallbacks comuns do SO (se existirem)
-async function getExecutablePath() {
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
-  }
-  try {
-    const ep = puppeteer.executablePath();
-    if (ep && fs.existsSync(ep)) return ep;
-  } catch (_) {}
-  const fallbacks = [
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-  ];
-  for (const p of fallbacks) {
-    if (fs.existsSync(p)) return p;
-  }
-  return undefined; // deixa o Puppeteer escolher
-}
-
+// Lança o browser (Puppeteer já resolve executablePath sozinho)
 async function getBrowser() {
   if (_browser) return _browser;
 
-  const executablePath = await getExecutablePath();
-  if (executablePath) {
-    console.log(`🧭 Usando Chrome em: ${executablePath}`);
-  } else {
-    console.log('🧭 Usando Chrome baixado pelo puppeteer (executablePath indefinido).');
-  }
-
   _browser = await puppeteer.launch({
-    headless: 'new', // ou true
-    executablePath,  // pode ser undefined; puppeteer usa o próprio
+    headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-zygote',
-      '--font-render-hinting=none',
-    ],
+      '--font-render-hinting=none'
+    ]
   });
 
+  console.log('🧭 Chrome iniciado pelo Puppeteer');
   return _browser;
 }
 
-// Healthcheck simples (Render usa para verificar se está no ar)
+// Healthcheck simples
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
 // Endpoint principal: recebe { html } e devolve PDF
 app.post('/api/gerar-pdf', async (req, res) => {
   try {
     const { html } = req.body || {};
-
     if (typeof html !== 'string' || !html.trim()) {
       return res.status(400).json({ error: 'Body inválido. Esperado { html: "<html...>" }' });
     }
@@ -84,11 +52,9 @@ app.post('/api/gerar-pdf', async (req, res) => {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
-    // Viewport e mídia de impressão
-    await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 }); // ~A4 @96dpi
+    await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 });
     await page.emulateMediaType('print');
 
-    // Garante uma base HTML válida. O front costuma enviar o CSS/KaTeX já no HTML.
     const fullHtml = /^<!doctype/i.test(html) ? html : `<!doctype html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -99,16 +65,14 @@ app.post('/api/gerar-pdf', async (req, res) => {
       timeout: 60_000,
     });
 
-    // Gera PDF (A4, usa @page do CSS do front)
     const pdf = await page.pdf({
       printBackground: true,
       preferCSSPageSize: true,
-      format: 'A4', // ignorado se preferCSSPageSize:true + @page size
+      format: 'A4',
       margin: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
     await page.close();
-
     console.log(`✅ PDF gerado. Bytes: ${pdf.length}`);
 
     res.set({
