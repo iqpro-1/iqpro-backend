@@ -1,7 +1,9 @@
 // server.js
 // --------------------------------------------
 // API para gerar PDF a partir de HTML (Render.com / Node 20.x)
-// com timeout maior e limite de concorrência de páginas
+// - Limite de concorrência de páginas
+// - Timeouts ampliados (navigation/content/protocol)
+// - Resposta BINÁRIA (Buffer + Content-Length) para não "virar JSON"
 // --------------------------------------------
 const express = require('express');
 const cors = require('cors');
@@ -13,14 +15,14 @@ app.use(express.json({ limit: '25mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-// Concorrência máxima de páginas abertas simultaneamente.
+// Concorrência máxima de páginas abertas simultaneamente.
 // Ajuste via env: PDF_CONCURRENCY=1..3 (2 é um bom ponto de partida em planos free)
 const MAX_CONCURRENT = Number(process.env.PDF_CONCURRENCY || 2);
 
 // Timeouts (ms)
-const NAV_TIMEOUT   = Number(process.env.PDF_NAV_TIMEOUT   || 120_000);
-const CONTENT_TIMEOUT = Number(process.env.PDF_CONTENT_TIMEOUT || 120_000);
-const PROTOCOL_TIMEOUT = Number(process.env.PDF_PROTOCOL_TIMEOUT || 180_000);
+const NAV_TIMEOUT        = Number(process.env.PDF_NAV_TIMEOUT        || 120_000);
+const CONTENT_TIMEOUT    = Number(process.env.PDF_CONTENT_TIMEOUT    || 120_000);
+const PROTOCOL_TIMEOUT   = Number(process.env.PDF_PROTOCOL_TIMEOUT   || 180_000);
 
 let _browser = null;
 
@@ -43,7 +45,7 @@ async function getBrowser() {
 
   _browser = await puppeteer.launch({
     headless: 'new',
-    protocolTimeout: PROTOCOL_TIMEOUT, // <— evita Target.createTarget timeout
+    protocolTimeout: PROTOCOL_TIMEOUT, // evita Target.createTarget timeout
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -55,6 +57,11 @@ async function getBrowser() {
       '--disable-extensions',
       '--disable-features=TranslateUI,BlinkGenPropertyTrees',
     ],
+  });
+
+  _browser.on?.('disconnected', () => {
+    console.warn('⚠️  Browser desconectado. Resetando instância.');
+    _browser = null;
   });
 
   console.log('🧭 Chrome iniciado pelo Puppeteer');
@@ -76,10 +83,10 @@ app.post('/api/gerar-pdf', async (req, res) => {
   try {
     const browser = await getBrowser();
 
-    // abrir página (pode ser o gargalo — por isso o semáforo acima)
+    // abrir página (gargalo — controlado pelo semáforo)
     page = await browser.newPage();
 
-    // timeouts mais folgados por página
+    // timeouts por página
     page.setDefaultNavigationTimeout(NAV_TIMEOUT);
     page.setDefaultTimeout(CONTENT_TIMEOUT);
 
@@ -112,20 +119,27 @@ app.post('/api/gerar-pdf', async (req, res) => {
       timeout: CONTENT_TIMEOUT, // puppeteer v22+ aceita timeout aqui
     });
 
-    console.log(`✅ PDF gerado. Bytes: ${pdf.length}`);
+    // 🔒 resposta binária segura (evita virar JSON de números)
+    const buf = Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
+    console.log(`✅ PDF gerado. Bytes: ${buf.length}; tipo: ${Buffer.isBuffer(pdf) ? 'Buffer' : (pdf?.constructor?.name || typeof pdf)}`);
 
-    res.set({
-      'Content-Type': 'application/pdf',
+    res.writeHead(200, {
+      'Content-Type': 'application/pdf',        // sem charset!
+      'Content-Length': buf.length,
       'Content-Disposition': 'attachment; filename="prova.pdf"',
       'Cache-Control': 'no-store',
+      'Connection': 'close',
     });
-    return res.status(200).send(pdf);
+    return res.end(buf);
   } catch (err) {
     console.error('Erro ao gerar PDF:', err);
-    return res.status(500).json({
-      error: 'Falha ao gerar PDF',
-      detail: err?.message || String(err),
-    });
+    // Retorno JSON de erro
+    try {
+      res.status(500).json({
+        error: 'Falha ao gerar PDF',
+        detail: err?.message || String(err),
+      });
+    } catch {}
   } finally {
     try { await page?.close(); } catch {}
     release();
