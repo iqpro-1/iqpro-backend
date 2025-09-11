@@ -28,8 +28,8 @@ async function getBrowser() {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-zygote',
-      '--font-render-hinting=none'
-    ]
+      '--font-render-hinting=none',
+    ],
   });
 
   console.log('🧭 Chrome iniciado pelo Puppeteer');
@@ -52,9 +52,11 @@ app.post('/api/gerar-pdf', async (req, res) => {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
-    await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 });
+    // Viewport e mídia de impressão
+    await page.setViewport({ width: 1123, height: 1588, deviceScaleFactor: 1 }); // ~A4 @96dpi
     await page.emulateMediaType('print');
 
+    // Garante uma base HTML válida
     const fullHtml = /^<!doctype/i.test(html) ? html : `<!doctype html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -65,22 +67,30 @@ app.post('/api/gerar-pdf', async (req, res) => {
       timeout: 60_000,
     });
 
+    // Gera PDF (A4, usa @page do CSS do front)
     const pdf = await page.pdf({
       printBackground: true,
       preferCSSPageSize: true,
-      format: 'A4',
+      format: 'A4', // ignorado se preferCSSPageSize:true + @page size
       margin: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
     await page.close();
-    console.log(`✅ PDF gerado. Bytes: ${pdf.length}`);
+
+    // 🔧 Converte para Buffer se for Uint8Array
+    const buf = Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
+
+    console.log(`✅ PDF gerado. Bytes: ${buf.length}`);
 
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'attachment; filename="prova.pdf"',
       'Cache-Control': 'no-store',
+      'Content-Length': String(buf.length),
     });
-    return res.status(200).send(pdf);
+
+    // Envia binário de verdade
+    return res.status(200).end(buf);
   } catch (err) {
     console.error('Erro ao gerar PDF:', err);
     return res.status(500).json({
